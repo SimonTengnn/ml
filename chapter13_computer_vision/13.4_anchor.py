@@ -107,7 +107,7 @@ show_bboxes(fig.axes, boxes[250, 250, :, :] * bbox_scale,
             ['s=0.75, r=1', 's=0.5, r=1', 's=0.25, r=1', 's=0.75, r=2',
              's=0.75, r=0.5'])
 
-""" 重点 mark"""
+"""!!重点 mark!!"""
 def box_iou(boxes1, boxes2):
     """ 计算交并比IoU """        # 对每个边界框都按(xmin,ymin,xmax,ymax)顺序，宽w=xmax-xmin,高h=ymax-ymin
     box_area = lambda boxes: ((boxes[:, 2]-boxes[:, 0]) * (boxes[:,3]-boxes[:,1]))
