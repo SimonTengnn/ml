@@ -1,3 +1,8 @@
+""" Single Shot MultiBox Detector
+    目标检测
+    基础网络-多尺度检测-默认框-边界框回归-非极大值抑制NMS
+"""
+
 import torch
 import torchvision
 import matplotlib.pyplot as plt
