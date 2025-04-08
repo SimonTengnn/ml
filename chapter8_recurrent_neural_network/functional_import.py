@@ -1,6 +1,7 @@
 import collections
 import re
 import random
+import torch
 from d2l import torch as d2l
 
 #@save
@@ -117,8 +118,8 @@ def seq_data_iter_sequential(corpus, batch_size, num_steps):
     num_token = (len(corpus)-offset-1) // batch_size * batch_size # //整除
     Xs = torch.tensor(corpus[offset:offset+num_token]) # X能用的所有token
     Ys = torch.tensor(corpus[offset+1:offset+1+num_token]) # Y能用的所有token
-    Xs.reshape(batch_size, -1) # reshape成每个batch的大小batch_size，也就是每个batch的行数
-    Ys.reshape(batch_size, -1)
+    Xs = Xs.reshape(batch_size, -1) # reshape成每个batch的大小batch_size，也就是每个batch的行数
+    Ys = Ys.reshape(batch_size, -1)
     num_sequence_per_row = Xs.shape[1] // num_steps # 看每一行能取出多少个num_steps的子序列
     for i in range(0, num_steps*num_sequence_per_row, num_steps):
         X = Xs[:, i:i+num_steps]

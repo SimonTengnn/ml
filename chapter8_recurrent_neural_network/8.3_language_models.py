@@ -1,3 +1,6 @@
+""" N元语法(也就是马尔可夫假设下tau=N-1)
+    顺序分区"""
+
 import torch
 import random
 import re
