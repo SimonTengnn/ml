@@ -2,6 +2,8 @@ import collections
 import re
 import random
 import torch
+import math
+from torch import nn
 from d2l import torch as d2l
 
 #@save
@@ -144,3 +146,145 @@ def load_data_time_machine(batch_size, num_steps,
                            use_random_iter=False, max_tokens=10000):
     data_iter = SeqDataLoader(batch_size, num_steps, use_random_iter, max_tokens)
     return data_iter, data_iter.vocab
+
+def get_params(vocab_size, num_hiddens, device):
+    num_inputs = num_outputs = vocab_size # one hot以后就是vocab的长度(分类的类别个数)
+
+    def normal(shape):
+        return torch.rand(size=shape, device=device) * 0.01
+        # return nn.init.xavier_uniform_(torch.empty(size=shape, device=device))
+    W_xh = normal((num_inputs, num_hiddens)) # num_hiddens是一个时间步的隐藏单元个数，每个时间步都有num_hiddensz个隐藏单元
+    W_hh = normal((num_hiddens, num_hiddens))
+    b_h = torch.zeros(num_hiddens, device=device)
+    W_ho = normal((num_hiddens, num_outputs))
+    b_o = torch.zeros(num_outputs, device=device)
+    params = [W_xh, W_hh, b_h, W_ho, b_o]
+    for param in params:
+        param.requires_grad_(True)
+    return params
+
+def init_rnn_state(batch_size, num_hiddens, device):
+    """ RNN在训练过程中会使用多个batch
+        对每个batch都要保存(batch_size,num_hiddens)大小的隐藏状态
+    """
+    return (torch.zeros((batch_size, num_hiddens), device=device),)
+
+def rnn(inputs, state, params):
+    """ 作为RNN的前向传播forward
+        inputs 输入序列(时间步数, batch_size, vocab_size) 也就是每个时间步所有输入X的one-hot
+        state 隐藏状态，上一个时间步传递的信息
+        params 模型参数 包括W_xh W_hh b_h W_ho b_o"""
+    W_xh, W_hh, b_h, W_ho, b_o = params # 解包
+    H, = state # 解包 state是只有H为元素的tuple(H,)
+    outputs = []
+    for X in inputs: # 每个时间步上，X的形状是(batch_size, vocab_size)
+        H = torch.tanh(torch.matmul(H, W_hh)+
+                       torch.matmul(X, W_xh)+
+                       b_h) # tanh是激活函数
+
+        Y = torch.matmul(H, W_ho) + b_o
+        outputs.append(Y)
+    return torch.cat(outputs, dim=0), (H,) # 输出的是 Y, state
+                                            # Y形状为(batch_size, vocab_size)
+
+class RNNModelScratch:
+    """ 将上述方法包装起来 """
+    def __init__(self, vocab_size, num_hiddens, device,
+                 get_params, init_state, forward_fn):
+        self.vocab_size, self.num_hiddens = vocab_size, num_hiddens
+        self.params = get_params(vocab_size, num_hiddens, device)
+        self.init_state, self.forward_fn = init_state, forward_fn
+
+    def __call__(self, X, state):
+        X = F.one_hot(X.T, self.vocab_size).type(torch.float32)
+        # X.T是为了将(batch_size, num_steps)转成(num_steps, batch_size)
+        # 按照时间步顺序喂入RNN
+        # 最终X的形状是(num_steps, batch_size, vocab_size)
+        return self.forward_fn(X, state, self.params)
+
+    def begin_state(self, batch_size, device):
+        return self.init_state(batch_size, self.num_hiddens, device)
+
+def predict_ch8(prefix, num_preds, net, vocab, device):
+    """ 在字符串prefix后生成新的字符"""
+    state = net.begin_state(batch_size=1, device=device)
+    outputs = [vocab[prefix[0]]]
+    get_input = lambda: torch.tensor([outputs[-1]], device=device).reshape((1, 1))
+
+    # 未超出原字符串
+    for y in prefix[1:]: # prefix字符串中给出的token
+        _, state = net(get_input(), state)  # 不记录生成的输出
+        outputs.append(vocab[y]) # 直接放入prefix原本的token
+
+    # 超出原字符串
+    for _ in range(num_preds):
+        y, state = net(get_input(), state)
+        outputs.append(int(y.argmax(dim=1).reshape(1))) # dim为去掉的维度
+        # 从每一列取出最大值，那就去掉列的维度
+    return ''.join([vocab.idx_to_token[i] for i in outputs])
+
+""" 梯度裁剪 """
+def grad_clipping(net, theta):
+    if isinstance(net, nn.Module):
+        params = [p for p in net.parameters() if p.requires_grad]
+    else:
+        params = net.params
+    norm = math.sqrt(sum(torch.sum(p.grad**2) for p in params))
+    if norm < theta:    # theta/norm < 1
+        for param in params:
+            param.grad[:] *= theta/norm # grad和grad[:]都可以，是一样的
+
+""" 训练 """
+def train_epoch(net, train_iter, loss, updater, device, use_random_iter):
+    """ 一个epoch的训练操作 """
+    state, timer = None, d2l.Timer()
+    metric = d2l.Accumulator(2) # 训练损失和， 词元总数
+    for X, Y in train_iter:
+        if state is None or use_random_iter:
+            # 第一次迭代 or 随机采样(不是顺序分区)
+            state = net.begin_state(X.shape[0], device=device)
+        else:
+            # 顺序分区 state会保留前一轮数据, 用detach保证反向传播不依赖之前的梯度
+            if isinstance(net, nn.Module) and not isinstance(state, tuple): # 第一次迭代
+                state.detach_()
+            else:
+                for s in state:
+                    s.detach_()
+        y = Y.T.reshape(-1)
+        X, y = X.to(device), y.to(device)
+        y_hat, state = net(X, state)
+        l = loss(y_hat, y.long()).mean()
+        if isinstance(updater, torch.optim.Optimizer):
+            updater.zero_grad()
+            l.backward()
+            grad_clipping(net, 1)
+            updater.step()
+        else:
+            l.backward()
+            grad_clipping(net, 1)
+            updater(batch_size=1)
+        metric.add(l * y.numel(), y.numel()) # .numel为tensor元素总数
+    return math.exp(metric[0] / metric[1]), metric[1] / timer.stop()
+
+def train_epochs(net, train_iter, vocab, lr, num_epochs, device,
+              use_random_iter=False):
+    """训练模型（定义见第8章）"""
+    loss = nn.CrossEntropyLoss()
+    animator = d2l.Animator(xlabel='epoch', ylabel='perplexity',
+                            legend=['train'], xlim=[10, num_epochs])
+    # 初始化
+    if isinstance(net, nn.Module):
+        updater = torch.optim.SGD(net.parameters(), lr)
+    else:
+        updater = lambda batch_size: d2l.sgd(net.params, lr, batch_size)
+    predict = lambda prefix: predict_ch8(prefix, 50, net, vocab, device)
+    # 训练和预测
+    for epoch in range(num_epochs):
+        ppl, speed = train_epoch(
+            net, train_iter, loss, updater, device, use_random_iter)
+        if (epoch + 1) % 10 == 0:
+            print(predict('time traveller'))
+            animator.add(epoch + 1, [ppl])
+    print(f'困惑度 {ppl:.1f}, {speed:.1f} 词元/秒 {str(device)}')
+    print(predict('time traveller'))
+    print(predict('traveller'))
